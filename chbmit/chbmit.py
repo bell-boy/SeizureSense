@@ -7,7 +7,7 @@ import einops
 
 class CHB_MIT_PAITENT(torch.utils.data.Dataset):
  
-  def __init__(self, tok_len: int, ctx_len: int, path: str):
+  def __init__(self, tok_len: int, ctx_len: int, path: str, classfication: bool = False, ppl: int=None):
     '''
     Class for handling sequences of seizures. Accesses seizure data via chunking into small token sized units, and returning sequences of tokens. 
     Gaps are filled with zeros.
@@ -16,10 +16,13 @@ class CHB_MIT_PAITENT(torch.utils.data.Dataset):
       tok_len: token duration in seconds
       ctx_len: the length of sequence to be returned in tokens
       path: the directory in which seizure files are stored
+      ppl: (defult None) preictal period length in seconds, the maximum distance your context window can be from a seizure to be labeled preictal. Set to None if you want the time
+      of the next seizure instead
     '''
     self.tok_len = tok_len
     self.ctx_len = ctx_len
     self.path = path
+    self.ppl = ppl
     self.eeg_raws = []
     self.seizure_periods = []
 
@@ -54,9 +57,11 @@ class CHB_MIT_PAITENT(torch.utils.data.Dataset):
   def get_start_end(self, raw):
     '''
     Helper function to get the start and end time of the raw relative to the paitnet baseline
-    args:
+
+    Args:
       raw: mne.io.edf.edf.EDF_RAW
-    returns:
+
+    Returns:
       (start_time: float, end_time: float)
     '''
     start = raw.info['meas_date'].timestamp() - self.baseline_time
@@ -67,6 +72,31 @@ class CHB_MIT_PAITENT(torch.utils.data.Dataset):
   def __len__(self):
     total_time = int(self.final_time - self.baseline_time)
     return (total_time // self.tok_len) - self.ctx_len + 1
+
+  def get_label(self, int_start: int, int_end: int):
+    '''
+    returns 1 if a seizure occurs within the interval [start, end] 0 otherwise
+
+    Args:
+      int_start: int, interval start time in seconds
+      int_end: int, interval end time in seconds
+    '''
+    for (start, end) in self.seizure_periods:
+      if start >= int_start and start <= int_end:
+        return 1
+    return 0
+
+  def get_next_seizure_time(self, time: int):
+    '''
+    find the next seizure after the given time
+
+    Args:
+      time: int
+    ''' 
+    for (start, end) in self.seizure_periods:
+      if start >= time:
+        return start
+    return float('inf')
 
   def __getitem__(self, idx):
     start_time = idx * self.tok_len
@@ -109,12 +139,18 @@ class CHB_MIT_PAITENT(torch.utils.data.Dataset):
 
       
       if started:
-        uncat_segments.append(raw.copy().get_data())
+        uncat_segments.append(new_raw.copy().get_data())
       next_start, next_end = self.get_start_end(self.eeg_raws[idx+1])
       if end_time >= end and end_time <= next_start:
         break
-   
-    pre_pad = np.concatenate(uncat_segments, axis=-1)
-    pad_len = int((end_time - start_time) * self.sample_rate - pre_pad.shape[-1])
-    return einops.rearrange(np.pad(pre_pad, ((0, 0), (0, pad_len))), "nchan (ctx_len tok_len) -> nchan ctx_len tok_len", ctx_len = self.ctx_len, nchan=self.nchan)
+    
+    label = self.get_label(end_time, end_time + self.ppl) if self.ppl is not None else self.get_next_seizure_time(end_time)
+    if len(uncat_segments) != 0:
+      pre_pad = np.concatenate(uncat_segments, axis=-1)
+      pad_len = int((end_time - start_time) * self.sample_rate - pre_pad.shape[-1])
+    else:
+      pre_pad = np.zeros((self.nchan, int((end_time - start_time) * self.sample_rate)))
+      pad_len = 0
+    return einops.rearrange(np.pad(pre_pad, ((0, 0), (0, pad_len))).astype(np.float32), "nchan (ctx_len tok_len) -> nchan ctx_len tok_len", ctx_len = self.ctx_len, nchan=self.nchan), label
+  
 
