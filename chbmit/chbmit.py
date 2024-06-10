@@ -23,27 +23,25 @@ def stft(signal, window_len, hop_len, window_fn=np.hanning):
 
     Returns:
       stft : ndarray
-        the short time fourier transform of the given signal
+        the short time fourier transform of the given signal (Note that the negative frequencies are removed)
     '''
     window = window_fn(window_len)
     
     n_windows = (signal.shape[-1] - window_len) // hop_len + 1
     
-    stft_matrix = np.zeros(signal.shape[:-1] + (n_windows, window_len), dtype=complex)
+    stft_matrix = np.zeros(signal.shape[:-1] + (n_windows, window_len // 2 + 1), dtype=complex)
     
     for i in range(n_windows):
         start = i * hop_len
         end = start + window_len
         segment = signal[..., start:end] * window
-        stft_matrix[..., i, :] = np.fft.fft(segment, n=window_len)
+        stft_matrix[..., i, :] = np.fft.rfft(segment, n=window_len)
     
     return stft_matrix
 
-
-
 class CHB_MIT_PAITENT(torch.utils.data.Dataset):
  
-  def __init__(self, tok_len: int, ctx_len: int, path: str, ppl: int=None):
+  def __init__(self, tok_len: int, ctx_len: int, path: str, ppl: int=None, use_tok_dim: bool=False):
     '''
     Class for handling sequences of seizures. Accesses seizure data via chunking into small token sized units, and returning sequences of tokens. 
     Gaps are filled with zeros.
@@ -54,6 +52,9 @@ class CHB_MIT_PAITENT(torch.utils.data.Dataset):
       path: the directory in which seizure files are stored
       ppl: (defult None) preictal period length in seconds, the maximum distance your context window can be from a seizure to be labeled preictal. Set to None if you want the time
       of the next seizure instead
+      use_tok_dim : boolean
+        (Default True) Most models at the time of writing don't want a token dimesion, they want the entire segment in one large block. This forces the 
+        dataset to drop the token dimension
     '''
     self.tok_len = tok_len
     self.ctx_len = ctx_len
@@ -61,6 +62,7 @@ class CHB_MIT_PAITENT(torch.utils.data.Dataset):
     self.ppl = ppl
     self.eeg_raws = []
     self.seizure_periods = []
+    self.use_tok_dim = use_tok_dim
 
     # Get all the EEG raws in the path directory and sort them by time stamp
     # Load raws
@@ -187,5 +189,38 @@ class CHB_MIT_PAITENT(torch.utils.data.Dataset):
     else:
       pre_pad = np.zeros((self.nchan, int((end_time - start_time) * self.sample_rate)))
       pad_len = 0
-    return einops.rearrange(np.pad(pre_pad, ((0, 0), (0, pad_len))).astype(np.float32), "nchan (ctx_len tok_len) -> nchan ctx_len tok_len", ctx_len = self.ctx_len, nchan=self.nchan), label
+    if self.use_tok_dim:
+      return (einops.rearrange(np.pad(pre_pad, ((0, 0), (0, pad_len))).astype(np.float32), "nchan (ctx_len tok_len) -> nchan ctx_len tok_len", ctx_len = self.ctx_len, nchan=self.nchan), label) 
+    else:
+      return (np.pad(pre_pad, ((0, 0), (0, pad_len))).astype(np.float32), label)
+
+class STFT(torch.nn.Module):
+  def __init__(self, window_len: int, hop_len: int, window_fn=np.hanning):
+    '''
+    Module to compute the STFT of a batch of signals with multiple batch dimensions
+
+    Init Args:
+      window_len : int
+        window length in samples
+      hop_len : int
+        hop size in samples
+      sample_rate : int
+        sample rate in Hz, default 256
+      window_fn : function
+        windowing function, default np.hanning
+
+    Forward Args:
+      signal : ndarray
+          A tensor of shape (..., n_samples)
+
+    Returns:
+      stft : ndarray
+        the short time fourier transform of the given signals
+    '''
+    super().__init__()
+    self.window_len = window_len
+    self.hop_len = hop_len
+    self.window_fn = window_fn
   
+  def forward(self, signals):
+    return stft(signals, self.window_len, self.hop_len, window_fn=self.window_fn)
