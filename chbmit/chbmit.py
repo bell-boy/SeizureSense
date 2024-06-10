@@ -5,9 +5,45 @@ import os
 import wfdb
 import einops
 
+def stft(signal, window_len, hop_len, window_fn=np.hanning):
+    '''
+    Compute the STFT of a batch of signals with multiple batch dimensions
+
+    Args:
+      signal : ndarray
+        A tensor of shape (..., n_samples)
+      window_len : int
+        window length in samples
+      hop_len : int
+        hop size in samples
+      sample_rate : int
+        sample rate in Hz, default 256
+      window_fn : function
+        windowing function, default np.hanning
+
+    Returns:
+      stft : ndarray
+        the short time fourier transform of the given signal
+    '''
+    window = window_fn(window_len)
+    
+    n_windows = (signal.shape[-1] - window_len) // hop_len + 1
+    
+    stft_matrix = np.zeros(signal.shape[:-1] + (n_windows, window_len), dtype=complex)
+    
+    for i in range(n_windows):
+        start = i * hop_len
+        end = start + window_len
+        segment = signal[..., start:end] * window
+        stft_matrix[..., i, :] = np.fft.fft(segment, n=window_len)
+    
+    return stft_matrix
+
+
+
 class CHB_MIT_PAITENT(torch.utils.data.Dataset):
  
-  def __init__(self, tok_len: int, ctx_len: int, path: str, classfication: bool = False, ppl: int=None):
+  def __init__(self, tok_len: int, ctx_len: int, path: str, ppl: int=None):
     '''
     Class for handling sequences of seizures. Accesses seizure data via chunking into small token sized units, and returning sequences of tokens. 
     Gaps are filled with zeros.
@@ -153,4 +189,3 @@ class CHB_MIT_PAITENT(torch.utils.data.Dataset):
       pad_len = 0
     return einops.rearrange(np.pad(pre_pad, ((0, 0), (0, pad_len))).astype(np.float32), "nchan (ctx_len tok_len) -> nchan ctx_len tok_len", ctx_len = self.ctx_len, nchan=self.nchan), label
   
-
