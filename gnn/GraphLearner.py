@@ -4,7 +4,7 @@ from torch import nn
 import scipy as sp
 from torch_geometric.utils import dense_to_sparse
 
-class GraphLearner(nn.Module):
+class GraphLearnerNN(nn.Module):
     def __init__(self, depth, threshold=0.1):
         super().__init__()
         self.depth = depth
@@ -12,7 +12,7 @@ class GraphLearner(nn.Module):
         self.Q = nn.Linear(depth,depth, bias=False)
         self.K = nn.Linear(depth,depth, bias=False)
 
-    def next(self,tensor):
+    def forward(self,tensor):
         queries = self.Q(tensor)
         keys = torch.transpose(self.K(tensor), -1,-2)
 
