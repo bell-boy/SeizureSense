@@ -25,6 +25,8 @@ def stft(signal, window_len, hop_len, window_fn=np.hanning):
       stft : ndarray
         the short time fourier transform of the given signal (Note that the negative frequencies are removed)
     '''
+    if type(signal) is torch.Tensor:
+      signal = signal.cpu()
     window = window_fn(window_len)
     
     n_windows = (signal.shape[-1] - window_len) // hop_len + 1
@@ -39,6 +41,7 @@ def stft(signal, window_len, hop_len, window_fn=np.hanning):
     
     return stft_matrix
 
+# TODO: Handle case where no seizure files are found
 class CHB_MIT_PAITENT(torch.utils.data.Dataset):
  
   def __init__(self, tok_len: int, ctx_len: int, path: str, ppl: int=None, use_tok_dim: bool=False):
@@ -195,7 +198,7 @@ class CHB_MIT_PAITENT(torch.utils.data.Dataset):
       return (np.pad(pre_pad, ((0, 0), (0, pad_len))).astype(np.float32), label)
 
 class STFT(torch.nn.Module):
-  def __init__(self, window_len: int, hop_len: int, window_fn=np.hanning):
+  def __init__(self, window_len: int, hop_len: int, window_fn=np.hanning, log_scale=True, device=torch.device('cpu')):
     '''
     Module to compute the STFT of a batch of signals with multiple batch dimensions
 
@@ -208,6 +211,8 @@ class STFT(torch.nn.Module):
         sample rate in Hz, default 256
       window_fn : function
         windowing function, default np.hanning
+      device
+        the device to which the STFT should return to 
 
     Forward Args:
       signal : ndarray
@@ -221,6 +226,11 @@ class STFT(torch.nn.Module):
     self.window_len = window_len
     self.hop_len = hop_len
     self.window_fn = window_fn
+    self.log_scale = log_scale
+    self.device = device
   
   def forward(self, signals):
-    return stft(signals, self.window_len, self.hop_len, window_fn=self.window_fn)
+    if not self.log_scale:
+      return torch.Tensor(stft(signals, self.window_len, self.hop_len, window_fn=self.window_fn)).to(self.device)
+    else:
+      return torch.Tensor(np.log(np.abs(stft(signals, self.window_len, self.hop_len, window_fn=self.window_fn)) + 1e-8) * 10).to(self.device)
