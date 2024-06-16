@@ -5,7 +5,7 @@ import scipy as sp
 from torch_geometric.utils import dense_to_sparse
 
 class GraphLearnerNN(nn.Module):
-    def __init__(self, depth, threshold=0.1):
+    def __init__(self, depth, threshold=0.01):
         super().__init__()
         self.depth = depth
         self.threshold= threshold
@@ -15,9 +15,8 @@ class GraphLearnerNN(nn.Module):
     def forward(self,tensor):
         queries = self.Q(tensor)
         keys = torch.transpose(self.K(tensor), -1,-2)
-
-        # this matrix multiplication results in the shape of the adj. matrix
-        adj = torch.matmul(queries,keys) / np.sqrt(self.depth) 
+        # Batched matrix multiplication, results in shape (batch, num_nodes, num_nodes)
+        adj = torch.bmm(queries,keys) / np.sqrt(self.depth) 
         
         # return the softmax of the learned adjacency matrix
         adj = torch.softmax(adj,dim=-1)
@@ -30,4 +29,5 @@ class GraphLearnerNN(nn.Module):
         adj[adj<=self.threshold] = 0
 
         edge_indexes, edge_weights = dense_to_sparse(adj)
+
         return edge_indexes, edge_weights
