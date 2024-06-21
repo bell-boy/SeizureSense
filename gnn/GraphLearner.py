@@ -26,7 +26,7 @@ class GraphLearner(nn.Module):
         # e.g the connection from [1,2] should be the same as [2,1]
         adj = (adj + adj.transpose(-1,-2))/2
 
-        # Set values below specified threshold to 0
+        # Set values below specified threshold to 0 to promote sparsity
         adj[adj<=self.threshold] = 0
 
         edge_indexes, edge_weights = dense_to_sparse(adj)

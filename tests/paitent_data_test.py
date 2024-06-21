@@ -8,7 +8,7 @@ raw_1 = mne.io.read_raw_edf(os.path.dirname(os.path.abspath(__file__)) + "/test_
 raw_2 = mne.io.read_raw_edf(os.path.dirname(os.path.abspath(__file__)) + "/test_data/chb01_02.edf")
 raw_3 = mne.io.read_raw_edf(os.path.dirname(os.path.abspath(__file__)) + "/test_data/chb01_03.edf")
 
-data = chbmit.CHB_MIT_PAITENT(10, 10, os.path.dirname(os.path.abspath(__file__)) + "/test_data")
+data = chbmit.CHB_MIT_PAITENT(10, 10, os.path.dirname(os.path.abspath(__file__)) + "/test_data", 3600, 0, use_tok_dim=True)
 
 def test_seizures():
   assert data.seizure_periods == [(7_210.0 + 2996, 7_210.0 + 3036)]

@@ -3,8 +3,10 @@ import numpy as np
 import torch
 import os
 import wfdb
+from tqdm import tqdm
 import einops
 
+# Todo, parallelize this
 def stft(signal, window_len, hop_len, window_fn=np.hanning):
     '''
     Compute the STFT of a batch of signals with multiple batch dimensions
@@ -42,30 +44,40 @@ def stft(signal, window_len, hop_len, window_fn=np.hanning):
     return stft_matrix
 
 # TODO: Handle case where no seizure files are found
+# TODO: Update Tests
 class CHB_MIT_PAITENT(torch.utils.data.Dataset):
  
-  def __init__(self, tok_len: int, ctx_len: int, path: str, ppl: int=None, use_tok_dim: bool=False):
+  def __init__(self, tok_len: int, ctx_len: int, path: str, sop: int, sph: int,  use_tok_dim: bool=False, regression: bool=False):
     '''
     Class for handling sequences of seizures. Accesses seizure data via chunking into small token sized units, and returning sequences of tokens. 
     Gaps are filled with zeros.
 
     Args:
-      tok_len: token duration in seconds
-      ctx_len: the length of sequence to be returned in tokens
-      path: the directory in which seizure files are stored
-      ppl: (defult None) preictal period length in seconds, the maximum distance your context window can be from a seizure to be labeled preictal. Set to None if you want the time
-      of the next seizure instead
-      use_tok_dim : boolean
+      tok_len : int
+        token duration in seconds
+      ctx_len : int
+        the length of sequence to be returned in tokens
+      path : int 
+        the directory in which seizure files are stored
+      sop : int 
+        Seizure Occurance Period in seconds, the maximum distance your context window can be from a seizure to be labeled preictal.
+      sph : int
+        Seizure Prediction Horizion in seconds, the minimum distnace your conext window can be from a seizure to be labeled preictal.
+
+      use_tok_dim : bool
         (Default True) Most models at the time of writing don't want a token dimesion, they want the entire segment in one large block. This forces the 
         dataset to drop the token dimension
+      regression : bool
+        (Defualt False) set the dataset in regression mode
     '''
     self.tok_len = tok_len
     self.ctx_len = ctx_len
     self.path = path
-    self.ppl = ppl
+    self.sop = sop
     self.eeg_raws = []
     self.seizure_periods = []
     self.use_tok_dim = use_tok_dim
+    self.regression = regression
 
     # Get all the EEG raws in the path directory and sort them by time stamp
     # Load raws
@@ -112,7 +124,10 @@ class CHB_MIT_PAITENT(torch.utils.data.Dataset):
 
   def __len__(self):
     total_time = int(self.final_time - self.baseline_time)
-    return (total_time // self.tok_len) - self.ctx_len + 1
+    if self.regression:
+      return ((total_time - self.sop) // self.tok_len) - self.ctx_len + 1
+    else:
+      return (total_time // self.tok_len) - self.ctx_len + 1
 
   def get_label(self, int_start: int, int_end: int):
     '''
@@ -129,13 +144,13 @@ class CHB_MIT_PAITENT(torch.utils.data.Dataset):
 
   def get_next_seizure_time(self, time: int):
     '''
-    find the next seizure after the given time
+    find the time of the next seizure after the given time within the sop, else return inf
 
     Args:
       time: int
     ''' 
     for (start, end) in self.seizure_periods:
-      if start >= time:
+      if start >= time and start - time <= self.sop:
         return start
     return float('inf')
 
@@ -185,7 +200,12 @@ class CHB_MIT_PAITENT(torch.utils.data.Dataset):
       if end_time >= end and end_time <= next_start:
         break
     
-    label = self.get_label(end_time, end_time + self.ppl) if self.ppl is not None else self.get_next_seizure_time(end_time)
+    if not self.regression:
+      label = self.get_label(end_time, end_time + self.sop)
+    elif self.use_tok_dim:
+      label = np.array([self.get_next_seizure_time(i + self.tok_len) - i for i in range(start_time, end_time, self.tok_len)])
+    else:
+      label = np.array(self.get_next_seizure_time(start_time + self.tok_len) - start_time)
     if len(uncat_segments) != 0:
       pre_pad = np.concatenate(uncat_segments, axis=-1)
       pad_len = int((end_time - start_time) * self.sample_rate - pre_pad.shape[-1])
@@ -196,6 +216,47 @@ class CHB_MIT_PAITENT(torch.utils.data.Dataset):
       return (einops.rearrange(np.pad(pre_pad, ((0, 0), (0, pad_len))).astype(np.float32), "nchan (ctx_len tok_len) -> nchan ctx_len tok_len", ctx_len = self.ctx_len, nchan=self.nchan), label) 
     else:
       return (np.pad(pre_pad, ((0, 0), (0, pad_len))).astype(np.float32), label)
+
+# TODO: Implement Undersampling
+class FilteredCMP(CHB_MIT_PAITENT):
+  def __init__(self, tok_len: int, ctx_len: int, path: str, sop: int, sph: int,  use_tok_dim: bool=False, regression: bool=False, balance_classes=False):
+    '''
+    A filtered version of CHB_MIT_PAITENT. Filters data out that is more than 2% sparse.
+
+    Args:
+      tok_len : int
+        token duration in seconds
+      ctx_len : int
+        the length of sequence to be returned in tokens
+      path : int 
+        the directory in which seizure files are stored
+      sop : int 
+        Seizure Occurance Period in seconds, the maximum distance your context window can be from a seizure to be labeled preictal.
+      sph : int
+        Seizure Prediction Horizion in seconds, the minimum distnace your conext window can be from a seizure to be labeled preictal.
+      use_tok_dim : bool
+        (Default True) Most models at the time of writing don't want a token dimesion, they want the entire segment in one large block. This forces the 
+        dataset to drop the token dimension
+      regression : bool
+        (Defualt False) set the dataset in regression mode
+      balance_classes : bool
+        (Default False) balance the number of positve and negative samples
+    '''
+    super().__init__(tok_len, ctx_len, path, sop, sph, use_tok_dim=use_tok_dim, regression=regression)
+    self.filtered_idx_list = []
+    self.temp = []
+    self.neg_examples = []
+    for i in tqdm(range(super().__len__())):
+      data, label = super().__getitem__(i)
+      if((np.abs(data) > 1e-8).astype(np.longlong).sum() / data.size > .98):
+        self.filtered_idx_list.append(i)
+
+  def __len__(self):
+    return len(self.filtered_idx_list)
+  
+  def __getitem__(self, idx):
+    return super().__getitem__(self.filtered_idx_list[idx])
+    
 
 class STFT(torch.nn.Module):
   def __init__(self, window_len: int, hop_len: int, window_fn=np.hanning, log_scale=True, device=torch.device('cpu')):
