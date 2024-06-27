@@ -3,45 +3,55 @@ import numpy as np
 import torch
 import os
 import wfdb
-from tqdm import tqdm
+from tqdm.notebook import tqdm
 import einops
+from multiprocessing import Pool
 
-# Todo, parallelize this
-def stft(signal, window_len, hop_len, window_fn=np.hanning):
-    '''
-    Compute the STFT of a batch of signals with multiple batch dimensions
+def stft(signal, window_len, hop_len, log_scale=True):
+    """
+    Compute the STFT of a batch of signals with multiple batch dimensions.
 
     Args:
-      signal : ndarray
-        A tensor of shape (..., n_samples)
-      window_len : int
-        window length in samples
-      hop_len : int
-        hop size in samples
-      sample_rate : int
-        sample rate in Hz, default 256
-      window_fn : function
-        windowing function, default np.hanning
+        signal : torch.Tensor
+            A tensor of shape (..., n_samples) on GPU.
+        window_len : int
+            Window length in samples.
+        hop_len : int
+            Hop size in samples.
+        window_fn : callable
+            Windowing function, default torch.hann_window.
+        log_scale : bool
+            Whether to apply log scaling to the STFT output.
 
     Returns:
-      stft : ndarray
-        the short time fourier transform of the given signal (Note that the negative frequencies are removed)
-    '''
-    if type(signal) is torch.Tensor:
-      signal = signal.cpu()
-    window = window_fn(window_len)
+        stft : torch.Tensor
+            The short-time Fourier transform of the given signal (Note that the negative frequencies are removed).
+    """
+    # Ensure signal is a tensor and on the GPU
+    #assert signal.is_cuda, "Signal tensor must be on GPU"
+
+    # Create window on the same device as signal
+    window = torch.hann_window(window_len, device=signal.device)
     
+    # Number of windows
     n_windows = (signal.shape[-1] - window_len) // hop_len + 1
     
-    stft_matrix = np.zeros(signal.shape[:-1] + (n_windows, window_len // 2 + 1), dtype=complex)
-    
+    # Initialize STFT matrix
+    stft_matrix = torch.zeros(
+        *signal.shape[:-1], n_windows, window_len // 2 + 1, dtype=torch.complex64, device=signal.device
+    )
+
+    # Compute STFT in a parallelized manner
     for i in range(n_windows):
         start = i * hop_len
         end = start + window_len
         segment = signal[..., start:end] * window
-        stft_matrix[..., i, :] = np.fft.rfft(segment, n=window_len)
+        stft_matrix[..., i, :] = torch.fft.rfft(segment, n=window_len)
+
+    if log_scale:
+        stft_matrix = torch.log10(torch.abs(stft_matrix) + 1e-8) * 10
     
-    return stft_matrix
+    return stft_matrix.float()
 
 # TODO: Handle case where no seizure files are found
 # TODO: Update Tests
@@ -250,48 +260,62 @@ class FilteredCMP(CHB_MIT_PAITENT):
       data, label = super().__getitem__(i)
       if((np.abs(data) > 1e-8).astype(np.longlong).sum() / data.size > .98):
         self.filtered_idx_list.append(i)
+    """
+    n_total = 0
+    self.mean_total = 0
+    sum_squares_total = 0
+    for idx in tqdm(self.filtered_idx_list):
+      data, label = super().__getitem__(idx)
+      n = data.size
+      mean_subsample = np.mean(data)
+      variance_subsample = np.var(data, ddof=0)  # Population variance
+
+      # Update total mean and sum of squares
+      n_total += n
+      self.mean_total += n * mean_subsample
+      sum_squares_total += (n - 1) * variance_subsample + n * mean_subsample**2
+
+    # Final mean of the total sample
+    self.mean_total /= n_total
+
+    # Calculate total variance
+    sum_squares_mean = n_total * self.mean_total**2
+    self.variance_total = (sum_squares_total - sum_squares_mean) / n_total
+    """
 
   def __len__(self):
     return len(self.filtered_idx_list)
   
   def __getitem__(self, idx):
-    return super().__getitem__(self.filtered_idx_list[idx])
+    data, label = super().__getitem__(self.filtered_idx_list[idx])
+    """
+    data -= self.mean_total
+    data /= np.sqrt(self.variance_total)
+    """
+    return data * 1e5, label
     
-
 class STFT(torch.nn.Module):
-  def __init__(self, window_len: int, hop_len: int, window_fn=np.hanning, log_scale=True, device=torch.device('cpu')):
-    '''
-    Module to compute the STFT of a batch of signals with multiple batch dimensions
+    def __init__(self, window_len: int, hop_len: int, log_scale=True, device=torch.device('cpu')):
+        """
+        Module to compute the STFT of a batch of signals with multiple batch dimensions.
 
-    Init Args:
-      window_len : int
-        window length in samples
-      hop_len : int
-        hop size in samples
-      sample_rate : int
-        sample rate in Hz, default 256
-      window_fn : function
-        windowing function, default np.hanning
-      device
-        the device to which the STFT should return to 
+        Args:
+            window_len : int
+                Window length in samples.
+            hop_len : int
+                Hop size in samples.
+            window_fn : function
+                Windowing function, default np.hanning.
+            log_scale : bool
+                Whether to apply log scaling to the STFT output.
+            device : torch.device
+                The device to which the STFT should return to.
+        """
+        super().__init__()
+        self.window_len = window_len
+        self.hop_len = hop_len
+        self.log_scale = log_scale
+        self.device = device
 
-    Forward Args:
-      signal : ndarray
-          A tensor of shape (..., n_samples)
-
-    Returns:
-      stft : ndarray
-        the short time fourier transform of the given signals
-    '''
-    super().__init__()
-    self.window_len = window_len
-    self.hop_len = hop_len
-    self.window_fn = window_fn
-    self.log_scale = log_scale
-    self.device = device
-  
-  def forward(self, signals):
-    if not self.log_scale:
-      return torch.Tensor(stft(signals, self.window_len, self.hop_len, window_fn=self.window_fn)).to(self.device)
-    else:
-      return torch.Tensor(np.log(np.abs(stft(signals, self.window_len, self.hop_len, window_fn=self.window_fn)) + 1e-8) * 10).to(self.device)
+    def forward(self, signals):
+        return stft(signals, self.window_len, self.hop_len, log_scale=self.log_scale).to(self.device)
