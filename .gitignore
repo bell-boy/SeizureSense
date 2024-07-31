@@ -3,5 +3,7 @@ __pycache__/
 *.pt
 *.ckpt
 bfg.jar
-.seizuresense/
+.venv
+.vscode
 .ipynb_checkpoints/
+physionet.org/

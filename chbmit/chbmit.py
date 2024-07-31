@@ -7,52 +7,6 @@ from tqdm.notebook import tqdm
 import einops
 from multiprocessing import Pool
 
-def stft(signal, window_len, hop_len, log_scale=True):
-    """
-    Compute the STFT of a batch of signals with multiple batch dimensions.
-
-    Args:
-        signal : torch.Tensor
-            A tensor of shape (..., n_samples) on GPU.
-        window_len : int
-            Window length in samples.
-        hop_len : int
-            Hop size in samples.
-        window_fn : callable
-            Windowing function, default torch.hann_window.
-        log_scale : bool
-            Whether to apply log scaling to the STFT output.
-
-    Returns:
-        stft : torch.Tensor
-            The short-time Fourier transform of the given signal (Note that the negative frequencies are removed).
-    """
-    # Ensure signal is a tensor and on the GPU
-    #assert signal.is_cuda, "Signal tensor must be on GPU"
-
-    # Create window on the same device as signal
-    window = torch.hann_window(window_len, device=signal.device)
-    
-    # Number of windows
-    n_windows = (signal.shape[-1] - window_len) // hop_len + 1
-    
-    # Initialize STFT matrix
-    stft_matrix = torch.zeros(
-        *signal.shape[:-1], n_windows, window_len // 2 + 1, dtype=torch.complex64, device=signal.device
-    )
-
-    # Compute STFT in a parallelized manner
-    for i in range(n_windows):
-        start = i * hop_len
-        end = start + window_len
-        segment = signal[..., start:end] * window
-        stft_matrix[..., i, :] = torch.fft.rfft(segment, n=window_len)
-
-    if log_scale:
-        stft_matrix = torch.log10(torch.abs(stft_matrix) + 1e-8) * 10
-    
-    return stft_matrix.float()
-
 # TODO: Handle case where no seizure files are found
 # TODO: Update Tests
 class CHB_MIT_PAITENT(torch.utils.data.Dataset):
@@ -294,28 +248,3 @@ class FilteredCMP(CHB_MIT_PAITENT):
     """
     return data * 1e5, label
     
-class STFT(torch.nn.Module):
-    def __init__(self, window_len: int, hop_len: int, log_scale=True, device=torch.device('cpu')):
-        """
-        Module to compute the STFT of a batch of signals with multiple batch dimensions.
-
-        Args:
-            window_len : int
-                Window length in samples.
-            hop_len : int
-                Hop size in samples.
-            window_fn : function
-                Windowing function, default np.hanning.
-            log_scale : bool
-                Whether to apply log scaling to the STFT output.
-            device : torch.device
-                The device to which the STFT should return to.
-        """
-        super().__init__()
-        self.window_len = window_len
-        self.hop_len = hop_len
-        self.log_scale = log_scale
-        self.device = device
-
-    def forward(self, signals):
-        return stft(signals, self.window_len, self.hop_len, log_scale=self.log_scale).to(self.device)
